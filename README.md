@@ -69,7 +69,7 @@ cd /data/tugraph_ldbc_snb
 ./import_data.sh
 ```
 ## 2.3 Preprocess db
-Perform preprocessing operations on the imported data database, including adding foreign keys, indexes, and filling the intermediate result fields required by the plugin.
+Perform preprocessing operations on the imported data database, including three steps of expanding foreign keys to vertices, building indexes, and building materialized views.
 ```shell
 cd /data/tugraph_ldbc_snb/plugins
 ./compile_embedded.sh generate_snb_constants
@@ -77,8 +77,8 @@ cd /data/tugraph_ldbc_snb/plugins
 ./compile_embedded.sh preprocess
 time ./preprocess ${DB_ROOT_DIR}/lgraph_db
 ```
-## 2.4 Install plugin
-Load 29 plugins for interactive workloads into the database
+## 2.4 Install stored procedure
+Load 29 stored procedures for interactive workloads into the database
 ```shell
 cd /data/tugraph_ldbc_snb
 lgraph_server -c lgraph_standalone.json -d stop --directory ${DB_ROOT_DIR}/lgraph_db
@@ -122,7 +122,7 @@ cd /data/tugraph_ldbc_snb
 lgraph_server -c lgraph_standalone.json -d stop --directory ${DB_ROOT_DIR}/lgraph_db
 ```
 ## 3.3 Check consistency
-After running the benchmark, verify that the data in the real result and intermediate result fields in the database are consistent.
+After executing the tests, verify the consistency of the database materialized view results.
 ```shell
 cd /data/tugraph_ldbc_snb/plugins
 ./compile_embedded.sh check_consistency
@@ -168,15 +168,18 @@ cd /data/tugraph_ldbc_snb/plugins
 
 Recently, TuGraph passed the Audit of LDBC SNB Interactive on the domestic ARM architecture platform, and its specific machine environment is shown in the table below.
 
-|  Machine type  |                                                                                                                                  Alibaba Cloud ecs.g8y.16xlarge                                                                                                                                  |
-|:--------------:|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|
-|      CPU       |                                                                                                                                 ARM-based YiTian 710，64核，2.75GHz                                                                                                                                 |
-|     Memory     |                                                                                                                                              256GB                                                                                                                                               |
-|      Disk      |                                                                                              NVMe SSD，ext4，The 4KB QD1 write performance measured with the fio command was an average of 3431 IOPS.                                                                                              |
-|    Network     |  Driver and SUT were assigned to the same VPC with the same subnetwork 172.16.16.0/20. Network throughput between the two instances measured using the iperf tool on port 9091 using 48 threads were an average of 33.4 Gbit/sec from client to server and 31.6 Gbit/sec from server to client.  |
-|       OS       |                                                                                                                              Alibaba Cloud Linux 3 (Soaring Falcon)                                                                                                                              |
+|  Machine type  |                                                                                                                                 Alibaba Cloud ecs.g8y.16xlarge                                                                                                                                 |
+|:--------------:|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------:|
+|      CPU       |                                                                                                                                ARM-based YiTian 710，64核，2.75GHz                                                                                                                                |
+|     Memory     |                                                                                                                                             256GB                                                                                                                                              |
+|      Disk      |                                                                                       NVMe SSD(cloud disk)，ext4，The 4KB QD1 write performance measured with the fio command was an average of 3431 IOPS.                                                                                       |
+|    Network     | Driver and SUT were assigned to the same VPC with the same subnetwork 172.16.16.0/20. Network throughput between the two instances measured using the iperf tool on port 9091 using 48 threads were an average of 33.4 Gbit/sec from client to server and 31.6 Gbit/sec from server to client. |
+|       OS       |                                                                                                                             Alibaba Cloud Linux 3 (Soaring Falcon)                                                                                                                             |
 
 According to the official report released by LDBC(https://ldbcouncil.org/benchmarks/snb/LDBC_SNB_I_20230128_SF30-100-300_tugraph.pdf), the performance of TuGraph on the sf30, sf100 and sf300 data sets has set a new world record, and its throughput has increased by 32%, 31% and 6% respectively compared with the previous audit. The specific results are shown in the following table .
+In testing we found:
+- Since NVMe SSD is a cloud disk, the performance of SNB is greatly affected by network fluctuations.
+- The data scale of sf300 exceeds the memory capacity, which is the key bottleneck restricting its SNB performance. But despite this, the SNB performance of sf300 still achieved 6% better performance than the last audit.
 
 |  Scale factor  |  Benchmark duration  |  Benchmark operations  | Throughput  |  Query on-time compliance  |
 |:--------------:|:--------------------:|:----------------------:|:-----------:|:--------------------------:|
@@ -184,3 +187,66 @@ According to the official report released by LDBC(https://ldbcouncil.org/benchma
 |     sf100      |   02h 00m 26.624s    |      122,608,813       |  16,966.26  |           95.63%           |
 |     sf300      |   02h 02m 51.486s    |       99,755,499       |  13 532.62  |           96.31%           |
 
+# 7. Notes
+## 7.1 Data Types
+
+Data types used in SNB are implemented with the following mappings:
+- ID: `INT64`
+- 32-bit integer: `INT32`
+- 64-bit integer: `INT64`
+- String, Long String, Text: `STRING`
+- Date, DateTime: `INT64`
+    - [Date](https://github.com/HowardHinnant/date/) is used for Date/DateTime arithmetics
+- List of Strings: `STRING`
+    - Items are separated via ';'
+
+## 7.2 Data Schema
+
+The schema can be inferred from `import.conf`.
+Some traits:
+- 1-to-1 and 1-to-N relationships are inlined as vertex properties (like foreign keys).
+- Some relationships are further refined according to the connecting entity types:
+    - `hasTag`: `forumHasTag`, `postHasTag`, `commenthasTag`
+    - `hasCreator`: `postHasCreator`, `commentHasCreator`
+    - `isLocatedIn`: `personIsLocatedIn`, `postIsLocatedIn`, `commentIsLocatedIn`
+- There are two precomputed edge properties (similar to materialized views):
+    - `hasMember.numPosts` which maintains the number of posts the given person posted in the given forum (used in Complex Read 5)
+    - `knows.weight` which maintains the weight between the pair of given persons, calculated using the formula in Complex Read 14
+
+### 7.2.1 Indexes
+
+Unique indexes are defined on:
+- `id` fields of all vertices (built automatically during data import)
+- `name` fields of `TagClass` and `Tag`
+
+A non-unique index is defined on `Place.name`.
+
+## 7.3 Data Generation
+
+In addition to using the `CsvCompositeMergeForeign` classes for serialization, TuGraph uses `LongDateFormatter` for Date/DateTime, and specifies `numUpdatePartitions` to generate multiple update streams.
+
+## 7.4 Bulk Load
+
+The bulk load phase consists of three steps:
+- Data preparation: a text processing script converts the csv files generated by `datagen` to a form that the TuGraph import utility requires.
+- Importing: `lgraph_import` is used to import the initial dataset. `id` indexes are built during this period.
+- Preprocessing: `preprocess` is executed which performs the following actions:
+    - Converting foreign key fields to actual vertex identifiers
+    - Building those `name` indexes
+    - Materializing `hasMember.numPosts` and `knows.weight`
+
+## 7.5 Stored Procedures
+
+All the operations are implemented with stored procedures using TuGraph Core API.
+Read (both complex and short) operations are marked as Read-Only while update operations are marked as Read-Write.
+
+Besides the insertions defined in the specification document, Update {5, 6} and Update {7, 8} contain additional logics for maintenance of the two precomputed edge properties.
+`check_consistency` can be used for checking the consistency of materialization.
+
+## 7.6 ACID Tests
+
+`acid` contains test cases detecting different types of anomalies.
+Using optimistic mode of read-write transactions is able to pass all but Write Skew tests (the first run).
+Using pessimistic mode of read-write transactions is able to pass all tests (the second run).
+
+Write skews can be avoided in optimistic mode by generating write-write conflicts explicitly (i.e. adding the read set for validation as well). Some read-write stored procedures use this technique to ensure consistency.

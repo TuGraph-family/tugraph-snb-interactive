@@ -69,7 +69,7 @@ cd /data/tugraph_ldbc_snb
 ./import_data.sh
 ```
 ## 2.3 预处理
-对导入数据的数据库执行预处理操作，包括增加外键，索引和填充plugin所需中间结果域等三类操作
+对导入数据的数据库执行预处理操作，包括将外键扩展为顶点、建立索引和建立物化视图等三个步骤
 ```shell
 cd /data/tugraph_ldbc_snb/plugins
 ./compile_embedded.sh generate_snb_constants
@@ -77,8 +77,8 @@ cd /data/tugraph_ldbc_snb/plugins
 ./compile_embedded.sh preprocess
 time ./preprocess ${DB_ROOT_DIR}/lgraph_db
 ```
-## 2.4 加载插件
-将交互式工作负载的29个查询加载到数据库中
+## 2.4 加载存储过程
+将交互式工作负载的29个查询存储过程加载到数据库中
 ```shell
 cd /data/tugraph_ldbc_snb
 lgraph_server -c lgraph_standalone.json -d stop --directory ${DB_ROOT_DIR}/lgraph_db
@@ -122,7 +122,7 @@ cd /data/tugraph_ldbc_snb
 lgraph_server -c lgraph_standalone.json -d stop --directory ${DB_ROOT_DIR}/lgraph_db
 ```
 ## 3.3 一致性检验
-执行完测试之后，验证数据库中真实结果和中间结果域的数据一致。
+执行完测试之后，验证数据库物化视图结果的一致性。
 ```shell
 cd /data/tugraph_ldbc_snb/plugins
 ./compile_embedded.sh check_consistency
@@ -148,7 +148,7 @@ lgraph_server -c lgraph_standalone.json -d start --directory ${DB_ROOT_DIR}/lgra
 ```
 # 5. ACID测试
 ## 5.1 交互式事务ACID测试
-ACID 测试实现经过审查已符合 ACID 测试规范，并实现了所有指定的测试用例。 此外，测试执行成功，没有原子性和隔离测试失败，支持可序列化隔离级别事务设置。
+ACID 测试实现经过审查已符合 ACID 测试规范，并实现了所有指定的测试用例。此外，测试执行成功，没有原子性和隔离测试失败，支持可序列化隔离级别事务设置。
 ```shell
 cd /data/tugraph_ldbc_snb/plugins
 ./compile_embedded.sh acid
@@ -168,15 +168,18 @@ cd /data/tugraph_ldbc_snb/plugins
 
 近日，TuGraph在国产ARM架构平台上通过了LDBC SNB Interactive的Audit，其具体机器环境如下表所示。
 
-| 机器型号  |                            Alibaba Cloud ecs.g8y.16xlarge                             |
-|:-----:|:-------------------------------------------------------------------------------------:|
-|  CPU  |                           ARM-based YiTian 710，64核，2.75GHz                            |
-|  内存   |                                         256GB                                         |
-|  硬盘   |                      NVMe SSD，ext4，使用fio测得4KB QD1写入性能为3431 IOPS                       |
-|  网络   | Driver和SUT部署在172.16.16.0/20子网中，使用48线程iperf测得client和server之间的数据传输速度分别为33.4G/s和31.6G/s  |
-| 操作系统  |                        Alibaba Cloud Linux 3 (Soaring Falcon)                         |
+| 机器型号  |                            Alibaba Cloud ecs.g8y.16xlarge                            |
+|:-----:|:------------------------------------------------------------------------------------:|
+|  CPU  |                           ARM-based YiTian 710，64核，2.75GHz                           |
+|  内存   |                                        256GB                                         |
+|  硬盘   |                    NVMe SSD（云盘），ext4，使用fio测得4KB QD1写入性能为3431 IOPS                    |
+|  网络   | Driver和SUT部署在172.16.16.0/20子网中，使用48线程iperf测得client和server之间的数据传输速度分别为33.4G/s和31.6G/s |
+| 操作系统  |                        Alibaba Cloud Linux 3 (Soaring Falcon)                        |
 
 据LDBC官方发布的报告(https://ldbcouncil.org/benchmarks/snb/LDBC_SNB_I_20230128_SF30-100-300_tugraph.pdf)，TuGraph在sf30，sf100和sf300数据集上的性能均刷新了世界纪录，其吞吐量分别比上次审计提升了32%、31%和6%，具体结果如下表所示。
+我们在测试中发现：
+- 由于NVMe SSD为云盘，故SNB的性能受网络波动影响较大。
+- sf300的数据规模超过内存容量是制约其SNB性能的关键瓶颈。但尽管如此，sf300的SNB性能仍然取得了超出上次审计6%的表现。
 
 |  数据规模  |       测试时长       |     查询数量     |    吞吐量     |  查询准时率  |
 |:------:|:----------------:|:------------:|:----------:|:-------:|
@@ -184,4 +187,66 @@ cd /data/tugraph_ldbc_snb/plugins
 | sf100  | 02h 00m 26.624s  | 122,608,813  | 16,966.26  | 95.63%  |
 | sf300  | 02h 02m 51.486s  |  99,755,499  | 13 532.62  | 96.31%  |
 
+# 7. 注释
+## 7.1 数据类型
 
+SNB 中使用的数据类型通过以下映射实现：
+- ID: `INT64`
+- 32-bit integer: `INT32`
+- 64-bit integer: `INT64`
+- String, Long String, Text: `STRING`
+- Date, DateTime: `INT64`
+  - [Date](https://github.com/HowardHinnant/date/) is used for Date/DateTime arithmetics
+- List of Strings: `STRING`
+  - Items are separated via ';'
+
+## 7.2 数据模式
+
+数据模式可以从`import.conf`中推断出来。
+一些traits:
+- 1 对 1 和 1 对 N 关系被内联为顶点属性（如外键）。
+- 一些关系根据连接的实体类型进一步细化：
+  - `hasTag`: `forumHasTag`, `postHasTag`, `commenthasTag`
+  - `hasCreator`: `postHasCreator`, `commentHasCreator`
+  - `isLocatedIn`: `personIsLocatedIn`, `postIsLocatedIn`, `commentIsLocatedIn`
+- 有两个预先计算的边缘属性（类似于物化视图）：
+  - `hasMember.numPosts` 维护给定人员在给定论坛中发布的帖子数（在 Complex Read 5 中使用）
+  - `knows.weight` 维持给定人对之间的权重，使用 Complex Read 14 中的公式计算
+
+### 7.2.1 索引
+
+唯一索引定义于：
+-  所有顶点的`id`字段（在数据导入期间自动构建）
+- `TagClass` 和 `Tag` 的 `name` 字段
+
+在`Place.name`上定义了一个非唯一索引。
+
+## 7.3 数据生成
+
+除了使用`CsvCompositeMergeForeign`类进行序列化之外，TuGraph 还使用`LongDateFormatter`处理日期/日期时间，并指定`numUpdatePartitions`来生成多个更新流。
+
+## 7.4 批量加载
+
+批量加载阶段包括三个步骤：
+- 数据准备：文本处理脚本将 `datagen` 生成的 csv 文件转换为 TuGraph 导入所需的格式。
+- 导入：`lgraph_import` 用于导入初始数据集。 `id` 索引就是在这个时期建立起来的。
+- 预处理：`preprocess`执行以下操作：
+  - 将外键字段转换为实际的顶点
+  - 建立`name`索引
+  - 实体化`hasMember.numPosts` 和 `knows.weight`
+
+## 7.5 存储过程
+
+所有操作都是使用 TuGraph Core API 通过存储过程实现的。
+读操作（complex和short）被标记为只读存储过程，而更新操作被标记为读写存储过程。
+
+除了规范文档中定义的插入之外，Update {5, 6} 和 Update {7, 8} 还包含用于维护两个预先计算的边缘属性的附加逻辑。
+`check_consistency` 可用于检查物化的一致性。
+
+## 7.6 ACID测试
+
+`acid` 包含检测不同类型异常的测试用例。
+使用读写事务的乐观模式能够通过除写偏斜测试（第一次运行）之外的所有测试。
+使用悲观模式的读写事务能够通过所有测试（第二次运行）。
+
+通过显式生成写-写冲突（例如添加读取集以进行验证），可以在乐观模式下避免写偏斜。一些读写存储过程使用这种技术来确保一致性。
