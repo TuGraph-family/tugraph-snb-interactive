@@ -1,0 +1,14 @@
+{
+    "directory" : "/data/lgraph_db",
+    "host" : "0.0.0.0",
+    "port" : 7071,
+    "enable_rpc" : true,
+    "rpc_port" : 9091,
+    "verbose" : 1,
+    "ssl_auth" : false,
+    "log_dir" : "./log",
+    "durable" : true,
+    "web" : "/usr/local/share/lgraph/resource",
+    "server_key" : "./server-key.pem",
+    "server_cert" : "./server-cert.pem"
+}
